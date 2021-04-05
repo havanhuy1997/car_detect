@@ -4,7 +4,7 @@ import time
 
 import cv2
 from tinydb import TinyDB, Query
-from tinydb.operations import increment
+from tinydb.operations import increment, decrement
 
 import mrcnn.model as modellib
 from mrcnn import utils, visualize
@@ -14,14 +14,17 @@ from mrcnn import utils, visualize
 from samples.coco.coco import CocoConfig
 # set the range needed for considering a new bounding boxes as existent
 BB_RANGE = 15
+COUNT_FOR_PARKED = 10
+FIRST_PERSISTENCE = 1
 
 # create database db.json
 db = TinyDB('db.json')
 bb_table = db.table("bounding_boxes")
 offset_table = db.table("offsets")
 
-bb_table.truncate()
 bb_query = Query()
+bb_table.update({"persistence": COUNT_FOR_PARKED}, bb_query.persistence > 10)
+bb_table.update({"persistence": 0}, bb_query.persistence < FIRST_PERSISTENCE)
 
 iteration = 1
 
@@ -99,32 +102,37 @@ while stream.isOpened():
     existing_boxs = []
     for box_index, box in enumerate(boxes):
         y1, x1, y2, x2 = (int(value) for value in box)
-        bb = bb_table.search(
+        bbs = bb_table.search(
             ((y1 - BB_RANGE < bb_query.y1) & (y1 + BB_RANGE > bb_query.y1)) &
             ((y2 - BB_RANGE < bb_query.y2) & (y2 + BB_RANGE > bb_query.y2)) &
             ((x1 - BB_RANGE < bb_query.x1) & (x1 + BB_RANGE > bb_query.x1)) &
             ((x2 - BB_RANGE < bb_query.x2) & (x2 + BB_RANGE > bb_query.x2))
         )
-        if bb:
-            existing_boxs.append({
-                "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                "persistence": bb[0]["persistence"] + 1,
-                "confidence": int(scores[box_index] * 100)
-            })
+        if bbs:
+            for b in bbs:
+                existing_boxs.append(b.doc_id)
         else:
             new_boxs.append({
                 "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                "persistence": 1, "confidence": int(scores[box_index] * 100),
+                "persistence": FIRST_PERSISTENCE,
+                "confidence": int(scores[box_index] * 100),
             })
-    bb_table.truncate()
 
-    # Add new bb
+
+    # Increase persistence of existing boxes
+    print("Existing boxs:", existing_boxs)
+    bb_table.update(increment("persistence"), doc_ids=existing_boxs)
+
+    # Decrease persistence of not presented boxes
+    all_ids = [b.doc_id for b in bb_table.all()]
+    bb_table.update(
+        decrement("persistence"),
+        doc_ids=list(set(all_ids) - set(existing_boxs))
+    )
+
+    # Add new boxes
     print("New boxs:", new_boxs)
     bb_table.insert_multiple(new_boxs)
-
-    # Update existing bb
-    print("Existing boxs:", existing_boxs)
-    bb_table.insert_multiple(existing_boxs)
 
     # Run detection
     start = time.time()
